@@ -1,0 +1,46 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "2.5.3",
+	"FriendlyName": "Shader World plugin",
+	"Description": "Landscapes/Oceans from Shader",
+	"Category": "Rendering",
+	"CreatedBy": "Maxime Dupart",
+	"CreatedByURL": "https://twitter.com/Max_Dupt",
+	"DocsURL": "",
+	"MarketplaceURL": "com.epicgames.launcher://ue/marketplace/product/519f5dc62d714ba8b116e4763ba1e542",
+	"SupportURL": "",
+	"EngineVersion": "5.1.0",
+	"CanContainContent": true,
+	"Installed": true,
+	"SupportedTargetPlatforms": [
+		"IOS",
+		"Android",
+		"Win64",
+		"Mac",
+		"Linux"
+	],
+	"Modules": [
+		{
+			"Name": "ShaderWorld",
+			"Type": "Runtime",
+			"LoadingPhase": "PostConfigInit"
+		},
+		{
+			"Name": "ShaderWorldEditor",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "ShaderWorldCore",
+			"Type": "Runtime",
+			"LoadingPhase": "PostConfigInit"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "StructUtils",
+			"Enabled": true
+		}
+	]
+}

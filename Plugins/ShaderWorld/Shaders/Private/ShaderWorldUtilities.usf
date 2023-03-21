@@ -1,0 +1,400 @@
+/*
+ * ShaderWorld: A procedural framework.
+ * Website : https://www.shader.world/
+ * Copyright (c) 2021-2023 MONSIEUR MAXIME DUPART
+ *
+ * This content is provided under the license of :
+ * Epic Content License Agreement - https://www.unrealengine.com/en-US/eula/content
+ *
+ * You may not Distribute Licensed Content in source format to third parties except to employees,
+ * affiliates, and contractors who are utilizing the Licensed Content in good faith to develop a Project
+ * on your behalf. Those employees, affiliates, and contractors you share Licensed Content
+ * with are not permitted to further Distribute the Licensed Content (including as incorporated in a Project)
+ * and must delete the Licensed Content once it is no longer needed for developing a Project on your behalf.
+ * You are responsible for ensuring that any employees, affiliates, or contractors you share Licensed Content
+ * with comply with the terms of this Agreement.
+ *
+ * General Restrictions - You may not:
+ * i. attempt to reverse engineer, decompile, translate, disassemble, or derive source code from Licensed Content;
+ * ii. sell, rent, lease, or transfer Licensed Content on a “stand-alone basis”
+ * (Projects must reasonably add value beyond the value of the Licensed Content,
+ * and the Licensed Content must be merely a component of the Project and not the primary focus of the Project);
+ *
+ */
+
+ /*
+  * Main authors: Maxime Dupart (https://twitter.com/Max_Dupt)
+  */
+
+#include "/Engine/Public/Platform.ush"
+
+#include "ShaderWorldUtilities.ush"
+
+
+
+#if SW_COMPUTE
+
+
+RWTexture2D<float4> DestinationTex;
+
+Texture2D SourceTex;
+SamplerState SourceTexSampler;
+
+uint SourceTextDim;
+uint DestTextDim;
+uint Border;
+uint ChannelSelect;
+
+float2 SourceLoc;
+float SourceWorldSize;
+float2 DestinationLoc;
+float DestWorldSize;
+
+Texture2D DestTexDuplicate;
+
+[numthreads(THREADGROUP_SIZEX, THREADGROUP_SIZEY, THREADGROUP_SIZEZ)]
+void SimpleCopyCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+	if(ThreadId.x < Border || ThreadId.y < Border || ThreadId.x >= (DestTextDim - Border) || ThreadId.y >= (DestTextDim - Border))
+		return;
+
+
+	if(ChannelSelect>0)
+	{
+		float2 UVPoint = float2(ThreadId.xy)/(DestTextDim-1.0);
+		float2 XY_World = DestinationLoc.xy + (UVPoint - float2(0.5,0.5)) * DestWorldSize;
+
+		uint2 UV_Source = uint2(saturate((XY_World - SourceLoc.xy)/(SourceWorldSize) + float2(0.5,0.5))*(SourceTextDim-1));
+
+		DestinationTex[ThreadId.xy] = float4(DestTexDuplicate[ThreadId.xy].xyz,!(ChannelSelect>1)?SourceTex[UV_Source].x:(!(ChannelSelect>2)?SourceTex[UV_Source].y:(!(ChannelSelect>3)?SourceTex[UV_Source].z:SourceTex[UV_Source].w)));
+
+		return;
+	}
+
+	DestinationTex[ThreadId.xy]=SourceTex[ThreadId.xy];
+
+}
+
+
+
+Texture2D Density;
+SamplerState DensitySampler;
+
+Texture2D HeightMap;
+SamplerState HeightMapSampler;
+
+Texture2D NormalMap;
+SamplerState NormalMapSampler;
+
+Texture2D PlacementNoiseMap;
+SamplerState PlacementNoiseMapSampler;
+
+uint SamplePerSide;
+uint Packed_DX_Status_N_RTDim;
+float AlignToSlopeOffset;
+float AlignMaxAngle;
+float MinSpawnHeight;
+float MaxSpawnHeight;
+float MinVerticalOffset;
+float MaxVerticalOffset;
+float MinScale;
+float MaxScale;
+float MinGroundSlope;
+float MaxGroundSlope;
+float MeshScale;
+float LocalGridScaling;
+float HasNoise;
+float3 MeshLocation;
+float3 RingLocation;
+
+[numthreads(THREADGROUP_SIZEX, THREADGROUP_SIZEY, THREADGROUP_SIZEZ)]
+void ComputeSpawnableCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+	if(ThreadId.x>=SamplePerSide || ThreadId.y>=SamplePerSide)
+		return;
+
+	uint DX_Status = (Packed_DX_Status_N_RTDim>>31)& 1;
+	uint AlignToSlope = (Packed_DX_Status_N_RTDim>>30) & 1;
+	uint N = (Packed_DX_Status_N_RTDim>>15)&0x7FFF;
+	uint RT_Dim = Packed_DX_Status_N_RTDim&0x7FFF;
+	
+	
+	float3 UVDensity = Density[ThreadId.xy].xyz;
+
+	// We Still generate points in the spawn material while iterating on point placement strategy
+	float2 UVPoint = UVDensity.xy;
+	float density = UVDensity.z;
+
+	float4 Pos_X_RGBA8 = float4(0,0,0,0);
+	float4 Pos_Y_RGBA8 = float4(0,0,0,0);
+	float4 Pos_Z_RGBA8 = float4(0,0,0,0);
+	float4 RotScale_RGBA8 = float4(0,0,0,0);
+
+	{
+		float noise = 0.0;
+		float noiseY = 0.0;
+		
+		if(HasNoise>0.0)
+		{
+			float x_dim=1,y_dim=1;
+			PlacementNoiseMap.GetDimensions(x_dim,y_dim);
+			
+			noise = PlacementNoiseMap[int2(UVPoint*float2(x_dim-1,y_dim-1))].x;
+			noiseY = PlacementNoiseMap[int2(float2(UVPoint.y,1.0-UVPoint.x)*float2(x_dim-1,y_dim-1))].x;
+		}
+
+		//UVPoint is bound to the precision we used to send it here (x/y are 0..255). Compensed by adding jitter
+		UVPoint = UVPoint + 1.0/255.0*(float2(noise,noiseY)-0.5);
+
+		float2 ScatterPointUV = (UVPoint - float2(0.5,0.5));
+
+		float3 ScatteredPointLoc = MeshLocation + MeshScale*float3(ScatterPointUV,0.0);
+
+		float2 UV =  saturate(( (ScatteredPointLoc.xy - RingLocation.xy) /((N-1.0)*LocalGridScaling/2.0)  )/2.0 + float2(0.5,0.5));
+
+		float3 Normal = SWNormalRead(NormalMap,UV);
+		
+		float Height = SmoothHRead(HeightMap,UV);
+
+		float3 Position = ScatteredPointLoc+float3(0.0,0.0,Height);
+
+		Position += lerp(MinVerticalOffset,MaxVerticalOffset, noise) * Normal;
+		
+		float ProvidedYaw = noise;
+		
+		if(AlignToSlope>0)
+		{
+			// Expected input yaw in range 0..1 converted in ComputeYRP into -Pi..Pi
+			ProvidedYaw = SanitizeAngle(AlignToSlopeOffset/180.0*3.1415926535);
+		}			
+		
+		float3 Rotation = ComputeYRP(AlignMaxAngle,Normal,ProvidedYaw).yzx/360.0;
+
+		float Scale = saturate(NormalCut(dot(Normal,float3(0.0,0.0,1.0)), MinGroundSlope,MaxGroundSlope,MinScale,MaxScale,noise,MinSpawnHeight,MaxSpawnHeight,Height,density )/20.0);
+
+		Position-=MeshLocation;
+
+		Pos_X_RGBA8 = FloatToRGBA8(Position.x);
+		Pos_Y_RGBA8 = FloatToRGBA8(Position.y);
+		Pos_Z_RGBA8 = FloatToRGBA8(Position.z);
+		RotScale_RGBA8 = float4(Rotation,Scale);
+
+	}
+
+	DestinationTex[2*ThreadId.xy] = Pos_X_RGBA8;
+	DestinationTex[2*ThreadId.xy+uint3(1,0,0).xy] = Pos_Y_RGBA8;
+	DestinationTex[2*ThreadId.xy+uint3(0,1,0).xy] = Pos_Z_RGBA8;
+	DestinationTex[2*ThreadId.xy+uint3(1,1,0).xy] = RotScale_RGBA8;
+	
+}
+
+uint NormalMapSizeX;
+uint N;
+float SWHeightmapScale;
+
+[numthreads(THREADGROUP_SIZEX, THREADGROUP_SIZEY, THREADGROUP_SIZEZ)]
+void NormalFromHeightMapCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+
+	if(ThreadId.x >= NormalMapSizeX || ThreadId.y >= NormalMapSizeX)
+		return;
+		
+	float2 Dim; //a=1,b=1;
+	SourceTex.GetDimensions(Dim.x,Dim.y);
+
+	float2 UV = ThreadId.xy/float2(NormalMapSizeX-1,NormalMapSizeX-1);
+
+	float WorldOffset = (N-1)*LocalGridScaling/Dim.x;
+
+	float2 res = Dim - 2*float2(1.0,1.0);
+	float2 DimM1 = Dim - float2(1.0,1.0);
+
+	float Res_ = res.x;
+	
+	float3 PosX = float3(WorldOffset,0.0,SmoothHRead(SourceTex,(float2(1.0,1.0) + UV*float2(Res_,Res_)+ float2(1.0,0.0))/DimM1)/SWHeightmapScale);
+	float3 PosY = float3(0.0,WorldOffset,SmoothHRead(SourceTex,(float2(1.0,1.0) + UV*float2(Res_,Res_)+ float2(0.0,1.0))/DimM1)/SWHeightmapScale);
+
+
+	#define HQNormal 1
+
+	#if HQNormal	
+
+	float3 PosXM = float3(-WorldOffset,0.0,SmoothHRead(SourceTex,(float2(1.0,1.0) + UV*float2(Res_,Res_)+ float2(-1.0,0.0))/DimM1)/SWHeightmapScale);
+	float3 PosYM = float3(0.0,-WorldOffset,SmoothHRead(SourceTex,(float2(1.0,1.0) + UV*float2(Res_,Res_)+ float2(0.0,-1.0))/DimM1)/SWHeightmapScale);
+
+	float3 Normal = normalize(cross(PosX-PosXM,PosY-PosYM));
+
+	#else
+
+	float3 Pos = float3(0.0,0.0,SmoothHRead(SourceTex,(float2(1.0,1.0) + UV*float2(Res_,Res_))/DimM1)/SWHeightmapScale);
+	float3 Normal = normalize(cross(PosX-Pos,PosY-Pos));
+
+	#endif
+
+	float X = saturate(Normal.x);
+	float Y = saturate(-Normal.x);
+	float Z = saturate(Normal.y);
+	float W = saturate(-Normal.y);
+
+	DestinationTex[ThreadId.xy]=float4(X,Y,Z,W);
+	
+}
+
+uint IndexLength;
+
+float NValue;
+
+Buffer<float> TexCoordBuffer;
+Buffer<uint> InputIndexBufferA;
+Buffer<uint> InputIndexBufferB;
+RWBuffer<uint> OutputIndexBuffer;
+
+[numthreads(THREADGROUP_SIZEX, THREADGROUP_SIZEY, THREADGROUP_SIZEZ)]
+void TopologyUpdateCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+	if(ThreadId.x >= IndexLength)
+		return;
+
+	uint TriangleIndice = ThreadId.x;
+
+
+	// Quad
+	// 3___2
+	// |   |
+	// 0___1		
+
+	uint Indice_local = InputIndexBufferA[3*TriangleIndice];
+	uint Ind_numX = InputIndexBufferA[3*TriangleIndice+1];
+	uint Ind_one = InputIndexBufferA[3*TriangleIndice+2];
+
+	uint Indice_0 = Indice_local;
+	uint Indice_1 = Ind_numX;
+	uint Indice_2 = Ind_numX+1;
+	uint Indice_3 = Indice_local+1;
+	
+	if(Ind_one-Indice_local>1)
+	{
+		Indice_0 = Indice_local-1;
+		Indice_1 = Ind_numX;
+		Indice_2 = Ind_one;
+		Indice_3 = Indice_local;
+	}
+
+	float2 UV0 = float2(TexCoordBuffer[4*2*(Indice_0)],TexCoordBuffer[4*2*(Indice_0) + 1])/(NValue-1);
+	float2 UV1 = float2(TexCoordBuffer[4*2*(Indice_1)],TexCoordBuffer[4*2*(Indice_1) + 1])/(NValue-1);
+	float2 UV2 = float2(TexCoordBuffer[4*2*(Indice_2)],TexCoordBuffer[4*2*(Indice_2) + 1])/(NValue-1);
+	float2 UV3 = float2(TexCoordBuffer[4*2*(Indice_3)],TexCoordBuffer[4*2*(Indice_3) + 1])/(NValue-1);
+
+	float2 UV0_abs = abs(UV0);
+	float2 UV1_abs = abs(UV1);
+	float2 UV2_abs = abs(UV2);
+	float2 UV3_abs = abs(UV3);
+
+	float Max0 = UV0_abs.x>UV0_abs.y?UV0_abs.x:UV0_abs.y;
+	float Max1 = UV1_abs.x>UV1_abs.y?UV1_abs.x:UV1_abs.y;
+	float Max2 = UV2_abs.x>UV2_abs.y?UV2_abs.x:UV2_abs.y;
+	float Max3 = UV3_abs.x>UV3_abs.y?UV3_abs.x:UV3_abs.y;
+
+	Max1 = Max1>Max2?Max1:Max2;
+	Max1 = Max1>Max3?Max1:Max3;
+	Max0 = Max0>Max1?Max0:Max1;
+
+	float Criteria = 0.5 - 0.25/(NValue-1);
+
+	if(Max0>Criteria)
+	{
+		//Stiching triangles not affected by topology improvements
+		OutputIndexBuffer[3*TriangleIndice] = InputIndexBufferA[3*TriangleIndice];
+		OutputIndexBuffer[3*TriangleIndice+1] = InputIndexBufferA[3*TriangleIndice+1];
+		OutputIndexBuffer[3*TriangleIndice+2] = InputIndexBufferA[3*TriangleIndice+2];
+	}
+	else
+	{
+
+		float2 DimH;
+		HeightMap.GetDimensions(DimH.x,DimH.y);
+
+		/*
+		float Res_ = DimH.x - 2.5;
+		//float Res_ = DimH.x - 2.0;
+		
+		float2 UV_Tex_0 = saturate(UV0+float2(0.5,0.5));
+		float2 UV_Tex_1 = saturate(UV1+float2(0.5,0.5));
+		float2 UV_Tex_2 = saturate(UV2+float2(0.5,0.5));
+		float2 UV_Tex_3 = saturate(UV3+float2(0.5,0.5));
+
+		float2 UV_Center = (UV_Tex_0+UV_Tex_2)/2.0;
+
+		float H0 = SW_HeightRead(HeightMap.Load(int3(floor(float2(1.5,1.5) + UV_Tex_0*float2(Res_,Res_)),0)));
+		float H1 = SW_HeightRead(HeightMap.Load(int3(floor(float2(1.5,1.5) + UV_Tex_1*float2(Res_,Res_)),0)));
+		float H2 = SW_HeightRead(HeightMap.Load(int3(floor(float2(1.5,1.5) + UV_Tex_2*float2(Res_,Res_)),0)));
+		float H3 = SW_HeightRead(HeightMap.Load(int3(floor(float2(1.5,1.5) + UV_Tex_3*float2(Res_,Res_)),0)));
+
+		//We have height information in between vertices
+		float H_center = SW_HeightRead(HeightMap.Load(int3(floor(float2(1.5,1.5) + UV_Center*float2(Res_,Res_)),0)));
+		*/
+
+		float Res_ = DimH.x - 3;
+		//float Res_ = DimH.x - 2.0;
+		
+		float2 UV_Tex_0 = saturate(UV0+float2(0.5,0.5));
+		float2 UV_Tex_1 = saturate(UV1+float2(0.5,0.5));
+		float2 UV_Tex_2 = saturate(UV2+float2(0.5,0.5));
+		float2 UV_Tex_3 = saturate(UV3+float2(0.5,0.5));
+
+		float2 UV_Center = (UV_Tex_0+UV_Tex_2)/2.0;
+
+		float H0 = SW_HeightRead(HeightMap.Load(int3(floor(float2(1.25,1.25) + UV_Tex_0*float2(Res_,Res_)),0)));
+		float H1 = SW_HeightRead(HeightMap.Load(int3(floor(float2(1.25,1.25) + UV_Tex_1*float2(Res_,Res_)),0)));
+		float H2 = SW_HeightRead(HeightMap.Load(int3(floor(float2(1.25,1.25) + UV_Tex_2*float2(Res_,Res_)),0)));
+		float H3 = SW_HeightRead(HeightMap.Load(int3(floor(float2(1.25,1.25) + UV_Tex_3*float2(Res_,Res_)),0)));
+
+		
+
+		//float H_center = SmoothHRead(HeightMap,UV_Center);
+		//float H_center = SmoothHRead(HeightMap,(float2(1.,1.) + UV_Center * float2(Res_,Res_))/(DimH.x - 1));
+		//SmoothHRead already does RTHeight scaling
+		float H_center = SmoothHRead(HeightMap,UV_Center);
+		/*
+		 *	float a=1,b=1;
+			SourceTex.GetDimensions(a,b);
+		 * SW_HeightRead(SourceTex.Load(int3(float2(1.0,1.0) + UV*float2(Res_,Res_),0)))
+		 * SmoothHRead(SourceTex,(float2(1.0,1.0) + UV*float2(Res_,Res_))/float2(a-1,b-1))
+		 *
+		 * SW_HeightRead(HeightMap.Load(int3(floor(float2(1.5,1.5) + UV_Center*float2(Res_,Res_)),0)));
+		 * 
+		 */
+
+		if( abs(H_center-(H3+H1)/2.0) <= abs(H_center-(H0+H2)/2.0) )
+		{
+			OutputIndexBuffer[3*TriangleIndice] = InputIndexBufferA[3*TriangleIndice];
+			OutputIndexBuffer[3*TriangleIndice+1] = InputIndexBufferA[3*TriangleIndice+1];
+			OutputIndexBuffer[3*TriangleIndice+2] = InputIndexBufferA[3*TriangleIndice+2];
+
+		}
+		else
+		{
+			OutputIndexBuffer[3*TriangleIndice] = InputIndexBufferB[3*TriangleIndice];
+			OutputIndexBuffer[3*TriangleIndice+1] = InputIndexBufferB[3*TriangleIndice+1];
+			OutputIndexBuffer[3*TriangleIndice+2] = InputIndexBufferB[3*TriangleIndice+2];
+		}
+	}
+
+}
+
+uint SampleDim;
+RWTexture2D<float2> DestLocationsTex;
+Buffer<float> SourceLocationBuffer;
+
+[numthreads(THREADGROUP_SIZEX, THREADGROUP_SIZEY, THREADGROUP_SIZEZ)]
+void SampleLocationLoaderCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+	if(ThreadId.x >= SampleDim || ThreadId.y >= SampleDim)
+		return;
+
+	uint IndexPixel = (ThreadId.x + ThreadId.y * SampleDim) * 2;
+	
+	DestLocationsTex[ThreadId.xy] = float2(SourceLocationBuffer[IndexPixel],SourceLocationBuffer[IndexPixel + 1]);
+}
+
+#endif

@@ -1,0 +1,247 @@
+/*
+ * ShaderWorld: A procedural framework.
+ * Website : https://www.shader.world/
+ * Copyright (c) 2021-2023 MONSIEUR MAXIME DUPART
+ *
+ * This content is provided under the license of :
+ * Epic Content License Agreement - https://www.unrealengine.com/en-US/eula/content
+ *
+ * You may not Distribute Licensed Content in source format to third parties except to employees,
+ * affiliates, and contractors who are utilizing the Licensed Content in good faith to develop a Project
+ * on your behalf. Those employees, affiliates, and contractors you share Licensed Content
+ * with are not permitted to further Distribute the Licensed Content (including as incorporated in a Project)
+ * and must delete the Licensed Content once it is no longer needed for developing a Project on your behalf.
+ * You are responsible for ensuring that any employees, affiliates, or contractors you share Licensed Content
+ * with comply with the terms of this Agreement.
+ *
+ * General Restrictions - You may not:
+ * i. attempt to reverse engineer, decompile, translate, disassemble, or derive source code from Licensed Content;
+ * ii. sell, rent, lease, or transfer Licensed Content on a “stand-alone basis”
+ * (Projects must reasonably add value beyond the value of the Licensed Content,
+ * and the Licensed Content must be merely a component of the Project and not the primary focus of the Project);
+ *
+ */
+
+ /*
+  * Main authors: Maxime Dupart (https://twitter.com/Max_Dupt)
+  */
+
+#pragma once
+
+float SWsqrtFast( float x )
+{
+	int i = asint(x);
+	i = 0x1FBD1DF5 + (i >> 1);
+	return asfloat(i);
+}
+
+float3 SWNormalRead(in Texture2D Tex, in float2 UV)
+{
+	
+	float a=1,b=1;
+	Tex.GetDimensions(a,b);
+	float4 NormalMapRead = Tex.Load(int3(UV*float2(a-1.0,b-1.0),0));
+
+	float X = NormalMapRead.x-NormalMapRead.y;
+	float Y = NormalMapRead.z-NormalMapRead.w;
+	float Z = sqrt(1.0-X*X-Y*Y);
+	return float3(X,Y,Z);
+}
+
+float RTHeight(float4 ReadFloat4)
+{
+	float4 Read = (ReadFloat4*255.0);
+
+	uint R_u = Read.x;
+	uint G_u = Read.y;
+	uint B_u = Read.z;
+	uint A_u = (R_u&0x80)>0?255:0;
+
+	uint Signbit = R_u&0x80;
+	uint Databit = R_u&0x7F;
+
+	int Height_int = ((Signbit<<24)&0x80000000) | (((A_u&0xFF)<<23)&0x7F800000) | (((Databit&0xFF)<<16)&0x7F0000) | (((G_u&0xFF)<<8)&0xFF00) | (B_u&0xFF);
+	return Height_int;
+}
+
+float SW_HeightRead(in float4 ReadFloat4)
+{
+	float4 Read = ReadFloat4*255.0;
+
+	uint R_uu = Read.x;
+	uint G_uu = Read.y;
+	uint B_uu = Read.z;
+
+	int R_u = R_uu;
+
+	int Pos = !((R_u&0x80)>0)?1:0;
+
+	int OutHeight=0;
+	OutHeight |= B_uu&0xFF;
+	OutHeight |= (G_uu<<8)&0xFF00;
+	OutHeight |= (((R_uu&0x7F) | (Pos>0?0x0:0x80))<<16)&0xFF0000;
+	OutHeight |= (Pos>0?0x0:0xFF000000);
+	return OutHeight;
+}
+
+float SmoothHRead(Texture2D Tex,float2 UV)
+{
+	float a=1,b=1;
+	Tex.GetDimensions(a,b);
+	
+	a=a-3;
+	b=b-3;
+	float2 UV_Scaled = float2(1.0,1.0)+UV*float2(a,b);
+	
+	float2 frac2 = frac(UV_Scaled);
+
+	 float C00 = SW_HeightRead( Tex[int2(UV_Scaled)]/*Tex.Load(int3(UV_Scaled,0))*/);
+	 float C10 = SW_HeightRead( Tex[int2(UV_Scaled + float2(1.0,0.0))]/*Tex.Load(int3(UV_Scaled + float2(1.0,0.0),0))*/);
+	 float C20 = SW_HeightRead( Tex[int2(UV_Scaled + float2(0.0,1.0))]/*Tex.Load(int3(UV_Scaled + float2(0.0,1.0),0))*/);
+	 float C30 = SW_HeightRead( Tex[int2(UV_Scaled + float2(1.0,1.0))]/*Tex.Load(int3(UV_Scaled + float2(1.0,1.0),0))*/);
+	return lerp(lerp(C00, C10, frac2.x), lerp(C20, C30, frac2.x), frac2.y);
+}
+
+
+float Gmod(float x, float y)
+{
+  return x - y * floor(x/y);
+}
+
+float3 Gmod(float3 x, float y)
+{
+  return float3(Gmod(x.x,y),Gmod(x.y,y),Gmod(x.z,y));
+}
+
+float3 EulerAngleFromRotMatrix(float3x3 AssetRot)
+{
+  float pitch = atan2(AssetRot[1][2],AssetRot[2][2]);
+   float roll = atan2(-AssetRot[0][2],SWsqrtFast(AssetRot[1][2]*AssetRot[1][2] + AssetRot[2][2]*AssetRot[2][2]));
+   float yaw  = atan2(AssetRot[0][1],AssetRot[0][0]);
+   return float3(pitch,yaw,roll)*180.0/3.1415926535;       
+}
+
+float3 VectorToAngle(float3 Dir)
+{
+     //float3(Pitch,Yaw,Roll)
+    float3 R = float3(0.0, 0.0, 0.0);
+    
+    // Find pitch.
+R.x = acos(Dir.z);
+    
+    if (isnan(R.x))
+        R.x = 0.0;
+    
+   // Find yaw.
+
+    R.y = atan2(Dir.y, Dir.x);
+    
+    if (isnan(R.y))
+        R.y = 0.0;  
+    
+    // Find roll.
+    R.z = 0.0;
+
+    return R;
+
+}
+
+float SanitizeAngle(float Angle)
+{
+    return Gmod(Angle + 3.1415926535, 3.1415926535 * 2.0) / (3.1415926535 * 2.0);
+}
+
+float3 ComputeYRP(in float AlignMaxAng,in float3 N,float in_Yaw)
+{
+	// Maxime Dupart personal note: Left handed coordinate NO MORE
+	// ;]
+
+	float3 AdjustedNormal = N;
+	float AlignCriteria = cos(AlignMaxAng/180.0*3.1415926535);
+	float PlanarNorm = N.x*N.x + N.y*N.y;
+
+	if(PlanarNorm>0.01 && cos(AlignMaxAng/180.0*3.1415926535)>N.z)
+	{
+		 AdjustedNormal.z = AlignCriteria;
+		float A = SWsqrtFast( (1.0-AlignCriteria*AlignCriteria)/PlanarNorm);
+		AdjustedNormal.xy = A*N.xy;
+	}
+
+	float extraYaw = (in_Yaw-0.5)*2.0*3.1415926535;
+
+	 //float3(Pitch,Yaw,Roll)
+	float3 TR = VectorToAngle(AdjustedNormal);
+
+	TR.y -=3.1415926535/2.0;
+
+	float3 angles = TR;
+	    
+	 float Pitch = angles.x;
+	 float Yaw = angles.y;
+	 float Roll = angles.z;
+
+	    float3x3 MatPitch = float3x3(
+	1.0,0.0,0.0,
+	0.0,cos(Pitch),sin(Pitch),
+	0.0,-sin(Pitch), cos(Pitch));
+
+	    float3x3 MatRoll = float3x3(
+	cos(Roll), 0.0, -sin(Roll),
+	0.0, 1.0, 0.0,
+	sin(Roll), 0.0, cos(Roll)
+	);
+
+	    float3x3 MatYaw = float3x3(
+	cos(Yaw), sin(Yaw), 0.0,
+	-sin(Yaw), cos(Yaw),0.0,
+	0.0, 0.0,1.0
+	 );
+
+
+	 float3x3 RandYaw = float3x3(
+	cos(extraYaw), sin(extraYaw), 0.0,
+	-sin(extraYaw), cos(extraYaw),0.0,
+	0.0, 0.0,1.0
+	 );
+
+
+	float3x3 CombineRot = mul(RandYaw,mul(MatRoll,mul(MatPitch,MatYaw)));
+	    
+	TR = EulerAngleFromRotMatrix(CombineRot);
+
+	return Gmod(TR,360.0);
+
+}
+
+float4 FloatToRGBA8(float Val)
+{
+	int Val_int = int(round(Val));
+	uint Val_uint = asuint(Val_int);
+
+	uint R = ((((Val_uint&0x80000000)>>8) | (Val_uint&0x7F0000))>>16)&0xFF;
+	uint G = ((Val_uint&0xFF00)>>8)&0xFF;
+	uint B = Val_uint&0xFF;
+	uint A = ((Val_uint&0x7F800000)>>23)&0xFF;
+
+	float R_f = R;
+	float G_f = G;
+	float B_f = B;
+	float A_f = A;
+
+	return float4(R_f, G_f, B_f, A_f)/255.0;
+}
+
+float NormalCut(in float Z,in float minSlope,in float maxSlope, 
+				in float minScale,in float maxScale,in float noise, 
+				in float minHeight,in float maxHeight,in float Height,in float Filter)
+{
+	float Slope = acos(Z)/3.14156535*180.f;
+	if(Filter>0 && Slope>=minSlope && Slope<= maxSlope)
+	{
+		if(Height>=minHeight && Height<= maxHeight)
+		{
+			return lerp(minScale,maxScale,saturate(noise));
+		}
+	}
+	return 0.0;
+}
